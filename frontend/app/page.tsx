@@ -1,63 +1,137 @@
-import Image from "next/image";
+"use client";
+
+import { useState, useEffect } from "react";
+import * as signalR from "@microsoft/signalr";
+import axios from "axios";
+import CodeEditor from "./components/CodeEditor";
+import OutputPanel from "./components/OutputPanel";
+import AIReviewPanel from "./components/AIReviewPanel";
+
+const API = "http://localhost:5000";
 
 export default function Home() {
+  const [language, setLanguage] = useState("python");
+  const [code, setCode] = useState("");
+  const [isRunning, setIsRunning] = useState(false);
+  const [isReviewing, setIsReviewing] = useState(false);
+  const [outputLines, setOutputLines] = useState<string[]>([]);
+  const [aiReview, setAiReview] = useState("");
+  const [executionTime, setExecutionTime] = useState<string>();
+  const [error, setError] = useState<string>();
+
+  const handleRun = async () => {
+    if (!code.trim() || isRunning) return;
+
+    // Reset state
+    setIsRunning(true);
+    setIsReviewing(false);
+    setOutputLines([]);
+    setAiReview("");
+    setExecutionTime(undefined);
+    setError(undefined);
+
+    try {
+      // 1. Submit code to backend — get back a submissionId
+      const { data } = await axios.post(`${API}/api/submission`, { code, language });
+      const submissionId = data.submissionId;
+
+      // 2. Connect to SignalR hub and join the submission's group
+      // All output and AI feedback for this run streams through this connection
+      const connection = new signalR.HubConnectionBuilder()
+        .withUrl(`${API}/hubs/execution`)
+        .withAutomaticReconnect()
+        .build();
+
+      connection.on("outputLine", (line: string) => {
+        setOutputLines((prev) => [...prev, line]);
+      });
+
+      connection.on("executionComplete", (summary: string) => {
+        setIsRunning(false);
+        setExecutionTime(summary.trim());
+      });
+
+      connection.on("reviewStarted", () => {
+        setIsReviewing(true);
+      });
+
+      connection.on("reviewChunk", (chunk: string) => {
+        setAiReview((prev) => prev + chunk);
+      });
+
+      connection.on("reviewComplete", () => {
+        setIsReviewing(false);
+        connection.stop();
+      });
+
+      await connection.start();
+      await connection.invoke("JoinSubmission", submissionId);
+    } catch (err: unknown) {
+      setIsRunning(false);
+      if (axios.isAxiosError(err) && err.response?.status === 429) {
+        setError("Rate limit exceeded. Max 10 runs per minute.");
+      } else {
+        setError("Failed to connect. Make sure the backend is running.");
+      }
+    }
+  };
+
   return (
-    <div className="flex flex-col flex-1 items-center justify-center bg-zinc-50 font-sans dark:bg-black">
-      <main className="flex flex-1 w-full max-w-3xl flex-col items-center justify-between py-32 px-16 bg-white dark:bg-black sm:items-start">
-        <Image
-          className="dark:invert"
-          src="/next.svg"
-          alt="Next.js logo"
-          width={100}
-          height={20}
-          priority
-        />
-        <div className="flex flex-col items-center gap-6 text-center sm:items-start sm:text-left">
-          <h1 className="max-w-xs text-3xl font-semibold leading-10 tracking-tight text-black dark:text-zinc-50">
-            To get started, edit the page.tsx file.
-          </h1>
-          <p className="max-w-md text-lg leading-8 text-zinc-600 dark:text-zinc-400">
-            Looking for a starting point or more instructions? Head over to{" "}
-            <a
-              href="https://vercel.com/templates?framework=next.js&utm_source=create-next-app&utm_medium=appdir-template-tw&utm_campaign=create-next-app"
-              className="font-medium text-zinc-950 dark:text-zinc-50"
-            >
-              Templates
-            </a>{" "}
-            or the{" "}
-            <a
-              href="https://nextjs.org/learn?utm_source=create-next-app&utm_medium=appdir-template-tw&utm_campaign=create-next-app"
-              className="font-medium text-zinc-950 dark:text-zinc-50"
-            >
-              Learning
-            </a>{" "}
-            center.
-          </p>
+    <div className="flex flex-col h-screen bg-[#0d0d0d] text-white overflow-hidden">
+      {/* Header */}
+      <header className="flex items-center justify-between px-6 py-3 bg-[#1a1a1a] border-b border-[#333] shrink-0">
+        <div className="flex items-center gap-3">
+          <div className="w-7 h-7 bg-[#00f0ff] rounded flex items-center justify-center">
+            <span className="text-black text-xs font-black">CP</span>
+          </div>
+          <span className="font-semibold text-white tracking-tight">CodePulse</span>
+          <span className="text-xs text-[#555] hidden sm:block">
+            AI-powered code execution & review
+          </span>
         </div>
-        <div className="flex flex-col gap-4 text-base font-medium sm:flex-row">
-          <a
-            className="flex h-12 w-full items-center justify-center gap-2 rounded-full bg-foreground px-5 text-background transition-colors hover:bg-[#383838] dark:hover:bg-[#ccc] md:w-[158px]"
-            href="https://vercel.com/new?utm_source=create-next-app&utm_medium=appdir-template-tw&utm_campaign=create-next-app"
-            target="_blank"
-            rel="noopener noreferrer"
-          >
-            <Image
-              className="dark:invert"
-              src="/vercel.svg"
-              alt="Vercel logomark"
-              width={16}
-              height={16}
+        <a
+          href="https://github.com/PatelMisha/CodePulse"
+          target="_blank"
+          rel="noreferrer"
+          className="text-xs text-[#555] hover:text-[#aaa] transition-colors"
+        >
+          GitHub
+        </a>
+      </header>
+
+      {/* Error banner */}
+      {error && (
+        <div className="mx-4 mt-3 px-4 py-2 bg-[#3a1a1a] border border-[#f48771]/40 rounded text-[#f48771] text-sm shrink-0">
+          {error}
+        </div>
+      )}
+
+      {/* Main layout — editor left, output + review right */}
+      <main className="flex flex-1 gap-3 p-3 overflow-hidden">
+        {/* Left — code editor */}
+        <div className="flex-1 min-w-0">
+          <CodeEditor
+            code={code}
+            language={language}
+            onCodeChange={setCode}
+            onLanguageChange={setLanguage}
+            onRun={handleRun}
+            isRunning={isRunning}
+          />
+        </div>
+
+        {/* Right — output + AI review stacked */}
+        <div className="w-[420px] flex flex-col gap-3 shrink-0">
+          <div className="flex-[0.4] min-h-0">
+            <OutputPanel
+              lines={outputLines}
+              executionTime={executionTime}
+              isRunning={isRunning}
             />
-            Deploy Now
-          </a>
-          <a
-            className="flex h-12 w-full items-center justify-center rounded-full border border-solid border-black/[.08] px-5 transition-colors hover:border-transparent hover:bg-black/[.04] dark:border-white/[.145] dark:hover:bg-[#1a1a1a] md:w-[158px]"
-            href="https://nextjs.org/docs?utm_source=create-next-app&utm_medium=appdir-template-tw&utm_campaign=create-next-app"
-            target="_blank"
-            rel="noopener noreferrer"
-          >
-            Documentation
-          </a>
+          </div>
+          <div className="flex-[0.6] min-h-0">
+            <AIReviewPanel review={aiReview} isReviewing={isReviewing} />
+          </div>
         </div>
       </main>
     </div>
