@@ -1,0 +1,22 @@
+# .NET
+bin/
+obj/
+*.user
+*.suo
+.vs/
+appsettings.Development.json
+
+# Node
+node_modules/
+.next/
+.env
+.env.local
+.env*.local
+npm-debug.log*
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Docker volumes
+postgres_data/
