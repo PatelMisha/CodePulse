@@ -8,6 +8,7 @@ public class Submission
     public string? Output { get; set; }
     public string? AIReview { get; set; }
     public string Status { get; set; } = "pending"; // pending, running, completed, failed
+    public double? ExecutionTimeMs { get; set; }
     public DateTime CreatedAt { get; set; } = DateTime.UtcNow;
 }
 
@@ -15,4 +16,9 @@ public class SubmitRequest
 {
     public string Code { get; set; } = string.Empty;
     public string Language { get; set; } = "python";
+}
+
+public class SubmitResponse
+{
+    public Guid SubmissionId { get; set; }
 }
