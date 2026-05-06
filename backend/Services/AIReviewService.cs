@@ -1,12 +1,11 @@
 using Anthropic.SDK;
+using Anthropic.SDK.Constants;
 using Anthropic.SDK.Messaging;
 using Microsoft.AspNetCore.SignalR;
 using backend.Hubs;
 
 namespace backend.Services;
 
-// Sends code + execution output to Claude and streams the review
-// back word by word so the user sees it appear live in the UI.
 public class AIReviewService
 {
     private readonly AnthropicClient _client;
@@ -55,18 +54,20 @@ public class AIReviewService
 
         var messageParams = new MessageParameters
         {
-            Model = AnthropicModels.Claude35Sonnet,
+            Model = AnthropicModels.Claude45Sonnet,
             MaxTokens = 1024,
             Stream = true,
             Messages = [new Message(RoleType.User, prompt)]
         };
 
-        await foreach (var chunk in _client.Messages.StreamClaudeMessageAsync(messageParams))
+        await foreach (var streamEvent in _client.Messages.StreamClaudeMessageAsync(messageParams))
         {
-            if (chunk is ContentBlockDeltaResponse delta && delta.Delta.Text is { } text)
-            {
+            var text = streamEvent.Content?
+                .OfType<TextContent>()
+                .FirstOrDefault()?.Text;
+
+            if (!string.IsNullOrEmpty(text))
                 await _hub.Clients.Group(submissionId).SendAsync("reviewChunk", text);
-            }
         }
 
         await _hub.Clients.Group(submissionId).SendAsync("reviewComplete");
