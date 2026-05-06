@@ -1,13 +1,13 @@
 "use client";
 
-import { useState, useEffect } from "react";
+import { useState } from "react";
 import * as signalR from "@microsoft/signalr";
 import axios from "axios";
 import CodeEditor from "./components/CodeEditor";
 import OutputPanel from "./components/OutputPanel";
 import AIReviewPanel from "./components/AIReviewPanel";
 
-const API = "http://localhost:5000";
+const API = "http://localhost:5167";
 
 export default function Home() {
   const [language, setLanguage] = useState("python");
@@ -63,6 +63,14 @@ export default function Home() {
         setIsReviewing(false);
         connection.stop();
       });
+
+      // Safety timeout — reset UI if nothing completes within 90s
+      const timeout = setTimeout(() => {
+        setIsRunning(false);
+        setIsReviewing(false);
+        setOutputLines((prev) => [...prev, "\nConnection timed out. Please try again."]);
+        connection.stop();
+      }, 90000);
 
       await connection.start();
       await connection.invoke("JoinSubmission", submissionId);

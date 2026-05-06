@@ -1,6 +1,6 @@
-using Anthropic.SDK;
-using Anthropic.SDK.Constants;
-using Anthropic.SDK.Messaging;
+using System.Net.Http.Headers;
+using System.Text;
+using System.Text.Json;
 using Microsoft.AspNetCore.SignalR;
 using backend.Hubs;
 
@@ -8,13 +8,15 @@ namespace backend.Services;
 
 public class AIReviewService
 {
-    private readonly AnthropicClient _client;
+    private readonly string _apiKey;
     private readonly IHubContext<ExecutionHub> _hub;
+    private readonly IHttpClientFactory _httpClientFactory;
 
-    public AIReviewService(IConfiguration config, IHubContext<ExecutionHub> hub)
+    public AIReviewService(IConfiguration config, IHubContext<ExecutionHub> hub, IHttpClientFactory httpClientFactory)
     {
-        _client = new AnthropicClient(config["Anthropic:ApiKey"] ?? "");
+        _apiKey = config["Gemini:ApiKey"] ?? "";
         _hub = hub;
+        _httpClientFactory = httpClientFactory;
     }
 
     public async Task ReviewAsync(string submissionId, string code, string language, string output)
@@ -52,22 +54,59 @@ public class AIReviewService
 
         await _hub.Clients.Group(submissionId).SendAsync("reviewStarted");
 
-        var messageParams = new MessageParameters
+        var requestBody = new
         {
-            Model = AnthropicModels.Claude45Sonnet,
-            MaxTokens = 1024,
-            Stream = true,
-            Messages = [new Message(RoleType.User, prompt)]
+            contents = new[]
+            {
+                new { parts = new[] { new { text = prompt } } }
+            },
+            generationConfig = new { maxOutputTokens = 1024 }
         };
 
-        await foreach (var streamEvent in _client.Messages.StreamClaudeMessageAsync(messageParams))
-        {
-            var text = streamEvent.Content?
-                .OfType<TextContent>()
-                .FirstOrDefault()?.Text;
+        var json = JsonSerializer.Serialize(requestBody);
+        var url = $"https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:streamGenerateContent?key={_apiKey}&alt=sse";
 
-            if (!string.IsNullOrEmpty(text))
-                await _hub.Clients.Group(submissionId).SendAsync("reviewChunk", text);
+        var client = _httpClientFactory.CreateClient();
+        var request = new HttpRequestMessage(HttpMethod.Post, url)
+        {
+            Content = new StringContent(json, Encoding.UTF8, "application/json")
+        };
+
+        using var response = await client.SendAsync(request, HttpCompletionOption.ResponseHeadersRead);
+
+        if (!response.IsSuccessStatusCode)
+        {
+            var err = await response.Content.ReadAsStringAsync();
+            await _hub.Clients.Group(submissionId).SendAsync("reviewChunk", $"AI review unavailable: {response.StatusCode}");
+            await _hub.Clients.Group(submissionId).SendAsync("reviewComplete");
+            return;
+        }
+
+        using var stream = await response.Content.ReadAsStreamAsync();
+        using var reader = new StreamReader(stream);
+
+        string? line;
+        while ((line = await reader.ReadLineAsync()) != null)
+        {
+            if (!line.StartsWith("data: ")) continue;
+
+            var data = line["data: ".Length..];
+            if (data == "[DONE]") break;
+
+            try
+            {
+                using var doc = JsonDocument.Parse(data);
+                var text = doc.RootElement
+                    .GetProperty("candidates")[0]
+                    .GetProperty("content")
+                    .GetProperty("parts")[0]
+                    .GetProperty("text")
+                    .GetString();
+
+                if (!string.IsNullOrEmpty(text))
+                    await _hub.Clients.Group(submissionId).SendAsync("reviewChunk", text);
+            }
+            catch { /* skip malformed chunks */ }
         }
 
         await _hub.Clients.Group(submissionId).SendAsync("reviewComplete");

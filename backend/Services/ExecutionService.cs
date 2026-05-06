@@ -13,16 +13,18 @@ public class ExecutionService
 
     private static readonly Dictionary<string, (string Image, string Extension, string Command)> Languages = new()
     {
-        ["python"]     = ("python:3.12-alpine",     "py",   "python"),
-        ["javascript"] = ("node:20-alpine",          "js",   "node"),
-        ["java"]       = ("openjdk:21-slim",         "java", "java"),
-        ["csharp"]     = ("mcr.microsoft.com/dotnet/script:8.0", "csx", "dotnet-script"),
+        ["python"]     = ("python:3.12-alpine",  "py", "python"),
+        ["javascript"] = ("node:20-alpine",       "js", "node"),
     };
 
     public ExecutionService(IHubContext<ExecutionHub> hub)
     {
         _hub = hub;
-        _docker = new DockerClientConfiguration().CreateClient();
+
+        var dockerHost = Environment.GetEnvironmentVariable("DOCKER_HOST")
+            ?? "unix:///Users/mp/.colima/default/docker.sock";
+
+        _docker = new DockerClientConfiguration(new Uri(dockerHost)).CreateClient();
     }
 
     public async Task<string> ExecuteAsync(string submissionId, string code, string language)
@@ -31,24 +33,20 @@ public class ExecutionService
             throw new ArgumentException($"Unsupported language: {language}");
 
         await _hub.Clients.Group(submissionId).SendAsync("executionStarted");
+        await _hub.Clients.Group(submissionId).SendAsync("outputLine", "Running...");
 
-        var tmpDir = Path.Combine(Path.GetTempPath(), submissionId);
+        // Use home directory — Colima mounts /Users automatically, unlike /tmp
+        var tmpDir = Path.Combine(
+            Environment.GetFolderPath(Environment.SpecialFolder.UserProfile),
+            ".codepulse", submissionId);
         Directory.CreateDirectory(tmpDir);
-        var codeFile = Path.Combine(tmpDir, $"solution.{config.Extension}");
-        await File.WriteAllTextAsync(codeFile, code);
+        await File.WriteAllTextAsync(Path.Combine(tmpDir, $"solution.{config.Extension}"), code);
 
-        var output = new StringBuilder();
         var startTime = DateTime.UtcNow;
+        string? containerId = null;
 
         try
         {
-            await _hub.Clients.Group(submissionId)
-                .SendAsync("outputLine", $"Preparing {language} environment...");
-
-            await _docker.Images.CreateImageAsync(
-                new ImagesCreateParameters { FromImage = config.Image, Tag = "latest" },
-                null, new Progress<JSONMessage>());
-
             var container = await _docker.Containers.CreateContainerAsync(new CreateContainerParameters
             {
                 Image = config.Image,
@@ -59,53 +57,55 @@ public class ExecutionService
                     Memory = 128 * 1024 * 1024,
                     NanoCPUs = 500_000_000,
                     NetworkMode = "none",
-                    AutoRemove = true,
                 },
                 AttachStdout = true,
                 AttachStderr = true,
             });
 
-            await _docker.Containers.StartContainerAsync(container.ID, null);
-            await _hub.Clients.Group(submissionId).SendAsync("outputLine", "Running...\n");
+            containerId = container.ID;
 
+            await _docker.Containers.StartContainerAsync(containerId, null);
+
+            // Wait for container to finish (max 10 seconds)
             var cts = new CancellationTokenSource(TimeSpan.FromSeconds(10));
+            await _docker.Containers.WaitContainerAsync(containerId, cts.Token);
 
-            // MultiplexedStream — read stdout and stderr in chunks
-            var logs = await _docker.Containers.GetContainerLogsAsync(container.ID, false,
-                new ContainerLogsParameters { ShowStdout = true, ShowStderr = true, Follow = true });
+            // Read full output after container finishes
+            var logs = await _docker.Containers.GetContainerLogsAsync(containerId, false,
+                new ContainerLogsParameters { ShowStdout = true, ShowStderr = true });
 
+            var output = new StringBuilder();
             var buffer = new byte[4096];
-            try
-            {
-                while (!cts.Token.IsCancellationRequested)
-                {
-                    var result = await logs.ReadOutputAsync(buffer, 0, buffer.Length, cts.Token);
-                    if (result.EOF) break;
 
-                    var chunk = Encoding.UTF8.GetString(buffer, 0, result.Count).TrimEnd('\r', '\n');
-                    if (string.IsNullOrEmpty(chunk)) continue;
-
-                    output.AppendLine(chunk);
-                    await _hub.Clients.Group(submissionId).SendAsync("outputLine", chunk);
-                }
-            }
-            catch (OperationCanceledException)
+            while (true)
             {
-                const string timeout = "Execution timed out (10s limit exceeded)";
-                output.AppendLine(timeout);
-                await _hub.Clients.Group(submissionId).SendAsync("outputLine", timeout);
+                var result = await logs.ReadOutputAsync(buffer, 0, buffer.Length, CancellationToken.None);
+                if (result.EOF) break;
+                var chunk = Encoding.UTF8.GetString(buffer, 0, result.Count);
+                output.Append(chunk);
             }
+
+            var outputStr = output.ToString().Trim();
+
+            foreach (var line in outputStr.Split('\n', StringSplitOptions.RemoveEmptyEntries))
+                await _hub.Clients.Group(submissionId).SendAsync("outputLine", line);
+
+            var elapsed = (DateTime.UtcNow - startTime).TotalMilliseconds;
+            await _hub.Clients.Group(submissionId)
+                .SendAsync("executionComplete", $"Completed in {elapsed:F0}ms");
+
+            return outputStr;
         }
         finally
         {
+            // Clean up container and temp files
+            if (containerId != null)
+            {
+                try { await _docker.Containers.RemoveContainerAsync(containerId,
+                    new ContainerRemoveParameters { Force = true }); } catch { }
+            }
             if (Directory.Exists(tmpDir))
                 Directory.Delete(tmpDir, recursive: true);
         }
-
-        var elapsed = (DateTime.UtcNow - startTime).TotalMilliseconds;
-        var summary = $"Completed in {elapsed:F0}ms";
-        await _hub.Clients.Group(submissionId).SendAsync("executionComplete", summary);
-
-        return output.ToString();
     }
 }

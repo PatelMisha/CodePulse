@@ -1,4 +1,6 @@
 using Microsoft.AspNetCore.Mvc;
+using Microsoft.AspNetCore.SignalR;
+using backend.Hubs;
 using backend.Models;
 using backend.Services;
 
@@ -11,12 +13,15 @@ public class SubmissionController : ControllerBase
     private readonly ExecutionService _execution;
     private readonly AIReviewService _aiReview;
     private readonly RateLimitService _rateLimit;
+    private readonly IHubContext<ExecutionHub> _executionHub;
 
-    public SubmissionController(ExecutionService execution, AIReviewService aiReview, RateLimitService rateLimit)
+    public SubmissionController(ExecutionService execution, AIReviewService aiReview,
+        RateLimitService rateLimit, IHubContext<ExecutionHub> executionHub)
     {
         _execution = execution;
         _aiReview = aiReview;
         _rateLimit = rateLimit;
+        _executionHub = executionHub;
     }
 
     // POST /api/submission
@@ -43,8 +48,20 @@ public class SubmissionController : ControllerBase
         // The browser subscribes to SignalR using this ID to receive streamed results.
         _ = Task.Run(async () =>
         {
-            var output = await _execution.ExecuteAsync(submissionId, request.Code, request.Language);
-            await _aiReview.ReviewAsync(submissionId, request.Code, request.Language, output);
+            // Give the client 1.5s to connect to SignalR and join the group
+            await Task.Delay(1500);
+            try
+            {
+                var output = await _execution.ExecuteAsync(submissionId, request.Code, request.Language);
+                await _aiReview.ReviewAsync(submissionId, request.Code, request.Language, output);
+            }
+            catch (Exception ex)
+            {
+                await _executionHub.Clients.Group(submissionId)
+                    .SendAsync("outputLine", $"Error: {ex.Message}");
+                await _executionHub.Clients.Group(submissionId)
+                    .SendAsync("executionComplete", "Failed");
+            }
         });
 
         return Ok(new SubmitResponse { SubmissionId = Guid.Parse(submissionId) });

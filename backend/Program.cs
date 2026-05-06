@@ -5,6 +5,7 @@ using StackExchange.Redis;
 var builder = WebApplication.CreateBuilder(args);
 
 builder.Services.AddControllers();
+builder.Services.AddHttpClient();
 
 // SignalR — real-time streaming to browser
 builder.Services.AddSignalR();
