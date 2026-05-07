@@ -14,7 +14,7 @@ public class AIReviewService
 
     public AIReviewService(IConfiguration config, IHubContext<ExecutionHub> hub, IHttpClientFactory httpClientFactory)
     {
-        _apiKey = config["Gemini:ApiKey"] ?? "";
+        _apiKey = config["Groq:ApiKey"] ?? "";
         _hub = hub;
         _httpClientFactory = httpClientFactory;
     }
@@ -56,28 +56,30 @@ public class AIReviewService
 
         var requestBody = new
         {
-            contents = new[]
+            model = "llama-3.3-70b-versatile",
+            messages = new[]
             {
-                new { parts = new[] { new { text = prompt } } }
+                new { role = "user", content = prompt }
             },
-            generationConfig = new { maxOutputTokens = 1024 }
+            max_tokens = 1024,
+            stream = true
         };
 
         var json = JsonSerializer.Serialize(requestBody);
-        var url = $"https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:streamGenerateContent?key={_apiKey}&alt=sse";
 
         var client = _httpClientFactory.CreateClient();
-        var request = new HttpRequestMessage(HttpMethod.Post, url)
+        var request = new HttpRequestMessage(HttpMethod.Post, "https://api.groq.com/openai/v1/chat/completions")
         {
             Content = new StringContent(json, Encoding.UTF8, "application/json")
         };
+        request.Headers.Authorization = new AuthenticationHeaderValue("Bearer", _apiKey);
 
         using var response = await client.SendAsync(request, HttpCompletionOption.ResponseHeadersRead);
 
         if (!response.IsSuccessStatusCode)
         {
             var err = await response.Content.ReadAsStringAsync();
-            await _hub.Clients.Group(submissionId).SendAsync("reviewChunk", $"AI review unavailable: {response.StatusCode}");
+            await _hub.Clients.Group(submissionId).SendAsync("reviewChunk", $"AI review unavailable ({response.StatusCode}): {err}");
             await _hub.Clients.Group(submissionId).SendAsync("reviewComplete");
             return;
         }
@@ -97,10 +99,9 @@ public class AIReviewService
             {
                 using var doc = JsonDocument.Parse(data);
                 var text = doc.RootElement
-                    .GetProperty("candidates")[0]
+                    .GetProperty("choices")[0]
+                    .GetProperty("delta")
                     .GetProperty("content")
-                    .GetProperty("parts")[0]
-                    .GetProperty("text")
                     .GetString();
 
                 if (!string.IsNullOrEmpty(text))
